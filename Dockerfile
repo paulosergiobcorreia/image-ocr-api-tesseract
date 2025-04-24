@@ -1,11 +1,13 @@
 # Usa a imagem base do Python 3.9
 FROM python:3.9-slim
 
-# Instala dependências do sistema, incluindo o Tesseract
+# Instala dependências do sistema, incluindo o Tesseract e dependências do OpenCV
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     libtesseract-dev \
     libleptonica-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Define o diretório de trabalho
