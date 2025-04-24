@@ -20,5 +20,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Cria o diretório para uploads
 RUN mkdir -p uploads
 
-# Define o comando para iniciar a API
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "app:app"]
+# Define o comando para iniciar a API usando gunicorn com worker uvicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "app:app"]
