@@ -1,129 +1,137 @@
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, UploadFile, File, HTTPException
 import pytesseract
+import cv2
+import numpy as np
 from PIL import Image
-import psycopg2
-from psycopg2 import pool
 import os
 import uuid
+from pathlib import Path
+import psycopg2
+from psycopg2 import sql
 
-app = Flask(__name__)
+app = FastAPI()
 
-# Configuração do banco de dados PostgreSQL
-db_pool = None
-
-def init_db_pool():
-    global db_pool
-    db_pool = psycopg2.pool.SimpleConnectionPool(
-        1, 20,
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT")
+# Configuração do banco de dados (usando as variáveis de ambiente do Render)
+try:
+    conn = psycopg2.connect(
+        dbname=os.getenv("DB_NAME", "image_ocr_db"),
+        user=os.getenv("DB_USER", "image_ocr_db_user"),
+        password=os.getenv("DB_PASSWORD", "MD3EfkfWD1gtStebg3TpBBK34Q1bMp26"),
+        host=os.getenv("DB_HOST", "dpg-d04m6195pdvs73a7ojjg-a.oregon-postgres.render.com"),
+        port=os.getenv("DB_PORT", "5432")
     )
+    cursor = conn.cursor()
+except Exception as e:
+    raise Exception(f"Erro ao conectar ao banco de dados: {str(e)}")
 
-# Inicializa o banco de dados e cria a tabela
-def init_db():
-    conn = db_pool.getconn()
+# Cria a tabela se não existir
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ocr_data (
+        id VARCHAR(36) PRIMARY KEY,
+        extracted_text TEXT,
+        image_path VARCHAR(255)
+    );
+""")
+conn.commit()
+
+# Função para pré-processar a imagem
+def preprocess_image(image_path):
+    # Carrega a imagem com OpenCV
+    img = cv2.imread(image_path)
+    
+    # Converte para escala de cinza
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Aumenta o contraste
+    alpha = 1.5  # Fator de contraste (1.0 = sem alteração, >1 aumenta)
+    beta = 0     # Brilho (0 = sem alteração)
+    adjusted = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
+    
+    # Aplica limiar (threshold) para binarizar a imagem
+    _, binary = cv2.threshold(adjusted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Salva a imagem processada temporariamente
+    processed_path = image_path.replace(".png", "_processed.png")
+    cv2.imwrite(processed_path, binary)
+    
+    return processed_path
+
+@app.post("/upload")
+async def upload_image(file: UploadFile = File(...)):
+    # Verifica se o arquivo é uma imagem
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Arquivo deve ser uma imagem")
+
+    # Cria o diretório "uploads" se não existir
+    Path("uploads").mkdir(exist_ok=True)
+    
+    # Salva a imagem original
+    file_id = str(uuid.uuid4())
+    file_path = f"uploads/{file_id}.png"
+    with open(file_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    # Pré-processa a imagem
+    processed_path = preprocess_image(file_path)
+
+    # Extrai texto com o Tesseract, usando parâmetros
+    image = Image.open(processed_path)
+    custom_config = r'--oem 3 --psm 6'  # OEM 3 (padrão), PSM 6 (texto em bloco único)
+    extracted_text = pytesseract.image_to_string(image, config=custom_config)
+
+    # Remove a imagem processada temporária
+    os.remove(processed_path)
+
+    # Salva no banco de dados
     try:
-        with conn.cursor() as c:
-            c.execute('''CREATE TABLE IF NOT EXISTS extracted_data (
-                         id TEXT PRIMARY KEY,
-                         extracted_text TEXT,
-                         image_path TEXT
-                         )''')
-            conn.commit()
-    finally:
-        db_pool.putconn(conn)
-
-# Inicializa o pool e o banco
-init_db_pool()
-init_db()
-
-# Endpoint para upload de imagem
-@app.route('/upload', methods=['POST'])
-def upload_image():
-    if 'image' not in request.files:
-        return jsonify({'error': 'Nenhuma imagem enviada'}), 400
-
-    file = request.files['image']
-    if file.filename == '':
-        return jsonify({'error': 'Nenhum arquivo selecionado'}), 400
-
-    try:
-        # Salva a imagem temporariamente
-        image_path = f"uploads/{uuid.uuid4()}.png"
-        os.makedirs('uploads', exist_ok=True)
-        file.save(image_path)
-
-        # Extrai texto usando Tesseract
-        image = Image.open(image_path)
-        extracted_text = pytesseract.image_to_string(image, lang='por')  # Configurado para português
-
-        # Gera um ID único para o registro
-        record_id = str(uuid.uuid4())
-
-        # Salva os dados no banco de dados
-        conn = db_pool.getconn()
-        try:
-            with conn.cursor() as c:
-                c.execute(
-                    "INSERT INTO extracted_data (id, extracted_text, image_path) VALUES (%s, %s, %s)",
-                    (record_id, extracted_text, image_path)
-                )
-                conn.commit()
-        finally:
-            db_pool.putconn(conn)
-
-        # Retorna o texto extraído e o ID do registro
-        return jsonify({
-            'id': record_id,
-            'extracted_text': extracted_text,
-            'image_path': image_path
-        }), 200
-
+        cursor.execute(
+            sql.SQL("INSERT INTO ocr_data (id, extracted_text, image_path) VALUES (%s, %s, %s)"),
+            (file_id, extracted_text, file_path)
+        )
+        conn.commit()
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar no banco: {str(e)}")
 
-# Endpoint para consultar dados por ID
-@app.route('/data/<id>', methods=['GET'])
-def get_data(id):
+    return {
+        "extracted_text": extracted_text,
+        "id": file_id,
+        "image_path": file_path
+    }
+
+@app.get("/data")
+async def get_all_data():
     try:
-        conn = db_pool.getconn()
-        try:
-            with conn.cursor() as c:
-                c.execute("SELECT * FROM extracted_data WHERE id = %s", (id,))
-                data = c.fetchone()
-                if data:
-                    return jsonify({
-                        'id': data[0],
-                        'extracted_text': data[1],
-                        'image_path': data[2]
-                    }), 200
-                else:
-                    return jsonify({'error': 'Registro não encontrado'}), 404
-        finally:
-            db_pool.putconn(conn)
-
+        cursor.execute("SELECT id, extracted_text, image_path FROM ocr_data")
+        rows = cursor.fetchall()
+        return [
+            {"id": row[0], "extracted_text": row[1], "image_path": row[2]}
+            for row in rows
+        ]
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
 
-# Endpoint para listar todos os registros
-@app.route('/data', methods=['GET'])
-def list_data():
+@app.get("/data/{item_id}")
+async def get_data_by_id(item_id: str):
     try:
-        conn = db_pool.getconn()
-        try:
-            with conn.cursor() as c:
-                c.execute("SELECT * FROM extracted_data")
-                rows = c.fetchall()
-                data = [{'id': row[0], 'extracted_text': row[1], 'image_path': row[2]} for row in rows]
-                return jsonify(data), 200
-        finally:
-            db_pool.putconn(conn)
-
+        cursor.execute(
+            sql.SQL("SELECT id, extracted_text, image_path FROM ocr_data WHERE id = %s"),
+            (item_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Registro não encontrado")
+        return {
+            "id": row[0],
+            "extracted_text": row[1],
+            "image_path": row[2]
+        }
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+# Fecha a conexão com o banco ao encerrar a API
+@app.on_event("shutdown")
+def shutdown_event():
+    cursor.close()
+    conn.close()
