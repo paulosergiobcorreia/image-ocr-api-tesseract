@@ -126,7 +126,7 @@ async def get_data_by_id(item_id: str):
             "id": row[0],
             "extracted_text": row[1],
             "image_path": row[2]
-        }
+        ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
 
