@@ -77,7 +77,7 @@ async def upload_image(file: UploadFile = File(...)):
 
     # Extrai texto com o Tesseract, usando parâmetros
     image = Image.open(processed_path)
-    custom_config = r'--oem 3 --psm 6'  # OEM 3 (padrão), PSM 6 (texto em bloco único)
+    custom_config = r'--oem 3 --psm 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:().% -'
     extracted_text = pytesseract.image_to_string(image, config=custom_config)
 
     # Remove a imagem processada temporária
