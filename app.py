@@ -1,60 +1,63 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-import pytesseract
-import cv2
-import numpy as np
-from PIL import Image
 import os
 import uuid
 from pathlib import Path
 import psycopg2
 from psycopg2 import sql
+import cv2
+from PIL import Image
+import pytesseract
+from fastapi import FastAPI, File, UploadFile, HTTPException
 
-app = FastAPI()
+# Configuração do banco de dados PostgreSQL
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:114723@localhost:5432/ocr_db")
+conn = psycopg2.connect(DATABASE_URL)
+cursor = conn.cursor()
 
-# Configuração do banco de dados (usando as variáveis de ambiente do Render)
-try:
-    conn = psycopg2.connect(
-        dbname=os.getenv("DB_NAME", "image_ocr_db"),
-        user=os.getenv("DB_USER", "image_ocr_db_user"),
-        password=os.getenv("DB_PASSWORD", "MD3EfkfWD1gtStebg3TpBBK34Q1bMp26"),
-        host=os.getenv("DB_HOST", "dpg-d04m6195pdvs73a7ojjg-a.oregon-postgres.render.com"),
-        port=os.getenv("DB_PORT", "5432")
-    )
-    cursor = conn.cursor()
-except Exception as e:
-    raise Exception(f"Erro ao conectar ao banco de dados: {str(e)}")
-
-# Cria a tabela se não existir
+# Criação da tabela no banco de dados, se não existir
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS ocr_data (
-        id VARCHAR(36) PRIMARY KEY,
+        id TEXT PRIMARY KEY,
         extracted_text TEXT,
-        image_path VARCHAR(255)
+        image_path TEXT
     );
 """)
 conn.commit()
 
-# Função para pré-processar a imagem
+app = FastAPI()
+
 def preprocess_image(image_path):
-    # Carrega a imagem com OpenCV
-    img = cv2.imread(image_path)
+    # Carrega a imagem
+    image = cv2.imread(image_path)
     
     # Converte para escala de cinza
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # Aumenta o contraste
-    alpha = 1.5  # Fator de contraste (1.0 = sem alteração, >1 aumenta)
-    beta = 0     # Brilho (0 = sem alteração)
-    adjusted = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
+    # Aplica um desfoque para reduzir ruído
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Aplica limiar (threshold) para binarizar a imagem
-    _, binary = cv2.threshold(adjusted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Aplica limiarização adaptativa para lidar com variações de cor
+    thresh = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+    )
     
-    # Salva a imagem processada temporariamente
+    # Inverte a imagem para que o texto seja preto e o fundo branco
+    thresh = cv2.bitwise_not(thresh)
+    
+    # Salva a imagem processada
     processed_path = image_path.replace(".png", "_processed.png")
-    cv2.imwrite(processed_path, binary)
+    cv2.imwrite(processed_path, thresh)
     
     return processed_path
+
+@app.get("/")
+async def root():
+    return {"message": "Bem-vindo à API de OCR com Tesseract!"}
+
+@app.get("/data")
+async def get_data():
+    cursor.execute("SELECT * FROM ocr_data")
+    rows = cursor.fetchall()
+    return [{"id": row[0], "extracted_text": row[1], "image_path": row[2]} for row in rows]
 
 @app.post("/upload")
 async def upload_image(file: UploadFile = File(...)):
@@ -76,9 +79,9 @@ async def upload_image(file: UploadFile = File(...)):
     processed_path = preprocess_image(file_path)
 
     # Extrai texto com o Tesseract, usando parâmetros
-    image = Image.open(processed_path)
+    image_processed = Image.open(processed_path)
     custom_config = r'--oem 3 --psm 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:().% -'
-    extracted_text = pytesseract.image_to_string(image, config=custom_config)
+    extracted_text = pytesseract.image_to_string(image_processed, config=custom_config)
 
     # Remove a imagem processada temporária
     os.remove(processed_path)
@@ -100,37 +103,6 @@ async def upload_image(file: UploadFile = File(...)):
         "image_path": file_path
     }
 
-@app.get("/data")
-async def get_all_data():
-    try:
-        cursor.execute("SELECT id, extracted_text, image_path FROM ocr_data")
-        rows = cursor.fetchall()
-        return [
-            {"id": row[0], "extracted_text": row[1], "image_path": row[2]}
-            for row in rows
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
-
-@app.get("/data/{item_id}")
-async def get_data_by_id(item_id: str):
-    try:
-        cursor.execute(
-            sql.SQL("SELECT id, extracted_text, image_path FROM ocr_data WHERE id = %s"),
-            (item_id,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Registro não encontrado")
-        return {
-            "id": row[0],
-            "extracted_text": row[1],
-            "image_path": row[2]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao consultar o banco: {str(e)}")
-
-# Fecha a conexão com o banco ao encerrar a API
 @app.on_event("shutdown")
 def shutdown_event():
     cursor.close()
