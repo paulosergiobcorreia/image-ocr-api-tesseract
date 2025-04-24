@@ -1,11 +1,11 @@
-# Usa uma imagem base com Python
+# Usa a imagem base do Python 3.9
 FROM python:3.9-slim
 
-# Instala dependências do sistema para Tesseract e OpenCV
+# Instala dependências do sistema, incluindo o Tesseract
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     libtesseract-dev \
-    libopencv-dev \
+    libleptonica-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Define o diretório de trabalho
@@ -17,8 +17,8 @@ COPY . .
 # Instala as dependências do Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Cria o diretório para uploads
-RUN mkdir -p uploads
+# Define a variável de ambiente para o Gunicorn encontrar o app
+ENV PYTHONPATH=/app
 
-# Define o comando para iniciar a API usando gunicorn com worker uvicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "app:app"]
+# Comando para iniciar a aplicação
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:10000", "app:app"]
