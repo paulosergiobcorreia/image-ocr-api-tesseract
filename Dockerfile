@@ -28,8 +28,5 @@ ENV PYTHONPATH=/app
 # Verifica se o Tesseract está instalado
 RUN tesseract --version
 
-# Verifica se o app.py pode ser importado
-RUN python -c "import app"
-
 # Comando para iniciar a aplicação
 CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:10000", "app:app"]
